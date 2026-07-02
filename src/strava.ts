@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 
+import type { StravaActivity } from "./analysis.js";
 import type { StravaEnv } from "./env.js";
 
 /** Base URL for Strava's read API; OAuth refresh uses a separate endpoint. */
@@ -19,6 +20,30 @@ type StoredToken = {
   expiresAt?: number;
 };
 
+/** Latest Strava rate-limit headers observed by this process. */
+export type RateLimitStatus = {
+  overall?: {
+    shortWindow: {
+      limit: number;
+      usage: number;
+    };
+    day: {
+      limit: number;
+      usage: number;
+    };
+  };
+  read?: {
+    shortWindow: {
+      limit: number;
+      usage: number;
+    };
+    day: {
+      limit: number;
+      usage: number;
+    };
+  };
+};
+
 /** Cursor inputs for Strava's paginated activity list endpoint. */
 export type RecentActivitiesInput = {
   /** Unix timestamp upper bound; omitted means Strava's default latest-first window. */
@@ -29,6 +54,16 @@ export type RecentActivitiesInput = {
   page?: number;
   /** Strava allows up to 100 activities per page. */
   perPage?: number;
+};
+
+/** Paginated date-range fetch options for tools that need local aggregation. */
+export type FetchActivitiesInput = {
+  /** Unix timestamp lower bound; required to avoid accidental full-history pulls. */
+  after: number;
+  /** Optional Unix timestamp upper bound. */
+  before?: number;
+  /** Safety stop for large backfills; defaults to enough pages for ordinary personal analysis. */
+  maxPages?: number;
 };
 
 /** Stream lookup options for activity samples. */
@@ -55,6 +90,8 @@ export class StravaClient {
   private refreshToken: string;
   /** Prevents repeatedly reading `tokenFile` on every tool call after startup. */
   private loadedTokenFile = false;
+  /** Last rate-limit snapshot observed on a Strava API response. */
+  private rateLimitStatus: RateLimitStatus | undefined;
 
   /** Create a client around already-validated Strava credentials. */
   constructor(private readonly env: StravaEnv) {
@@ -67,6 +104,8 @@ export class StravaClient {
    * @throws Error when token refresh or the Strava activity endpoint fails.
    */
   async getRecentActivities(input: RecentActivitiesInput) {
+    this.requireScopes(["activity:read"]);
+
     const params = new URLSearchParams();
 
     if (input.before) params.set("before", String(input.before));
@@ -75,6 +114,33 @@ export class StravaClient {
     params.set("per_page", String(input.perPage ?? 20));
 
     return this.get(`/athlete/activities?${params.toString()}`);
+  }
+
+  /**
+   * Fetch every visible activity in a bounded date range for local summarization.
+   *
+   * @throws Error when token refresh fails, Strava rejects a page, or `maxPages` is exhausted.
+   */
+  async fetchActivities(input: FetchActivitiesInput): Promise<StravaActivity[]> {
+    const activities: StravaActivity[] = [];
+    const maxPages = input.maxPages ?? 20;
+
+    for (let page = 1; page <= maxPages; page += 1) {
+      const batch = (await this.getRecentActivities({
+        after: input.after,
+        before: input.before,
+        page,
+        perPage: 100,
+      })) as StravaActivity[];
+
+      activities.push(...batch);
+
+      if (batch.length < 100) {
+        return activities;
+      }
+    }
+
+    throw new Error(`Stopped after ${maxPages} pages; narrow the date range or raise maxPages.`);
   }
 
   /**
@@ -91,8 +157,14 @@ export class StravaClient {
    *
    * @throws Error when token refresh fails, the id is inaccessible, or Strava rejects the request.
    */
-  async getActivity(id: number) {
-    return this.get(`/activities/${id}`);
+  async getActivity(id: number, includeAllEfforts = false) {
+    this.requireScopes(["activity:read"]);
+
+    const params = new URLSearchParams();
+    if (includeAllEfforts) params.set("include_all_efforts", "true");
+    const query = params.size ? `?${params.toString()}` : "";
+
+    return this.get(`/activities/${id}${query}`);
   }
 
   /**
@@ -101,6 +173,8 @@ export class StravaClient {
    * @throws Error when token refresh fails, the activity is inaccessible, or requested stream keys are invalid.
    */
   async getActivityStreams(input: ActivityStreamsInput) {
+    this.requireScopes(["activity:read"]);
+
     const keys = input.keys?.length
       ? input.keys
       : ["time", "distance", "altitude", "heartrate", "cadence", "watts", "latlng"];
@@ -123,6 +197,53 @@ export class StravaClient {
   }
 
   /**
+   * Fetch detail for a Strava gear id, useful when activity payloads only include `gear_id`.
+   *
+   * @throws Error when token refresh fails or the gear is inaccessible to the authenticated athlete.
+   */
+  async getGear(id: string) {
+    return this.get(`/gear/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Fetch the authenticated athlete's configured heart-rate and power zones.
+   *
+   * @throws Error when `profile:read_all` was not granted or Strava rejects the request.
+   */
+  async getAthleteZones() {
+    this.requireScopes(["profile:read_all"]);
+
+    return this.get("/athlete/zones");
+  }
+
+  /**
+   * Fetch Strava's zone distribution for one visible activity.
+   *
+   * @throws Error when the activity is inaccessible, zones are unavailable, or Strava rejects the request.
+   */
+  async getActivityZones(id: number) {
+    this.requireScopes(["activity:read"]);
+
+    return this.get(`/activities/${id}/zones`);
+  }
+
+  /**
+   * Fetch laps for one visible activity.
+   *
+   * @throws Error when the activity is inaccessible or Strava rejects the request.
+   */
+  async getActivityLaps(id: number) {
+    this.requireScopes(["activity:read"]);
+
+    return this.get(`/activities/${id}/laps`);
+  }
+
+  /** Return the latest rate-limit headers observed by this MCP process. */
+  getRateLimitStatus() {
+    return this.rateLimitStatus ?? null;
+  }
+
+  /**
    * Perform an authenticated Strava GET and surface API failures as MCP-visible errors.
    *
    * @throws Error when Strava returns a non-2xx response or token refresh fails.
@@ -134,9 +255,14 @@ export class StravaClient {
         authorization: `Bearer ${token}`,
       },
     });
+    this.rateLimitStatus = parseRateLimitHeaders(response.headers);
 
     if (!response.ok) {
-      throw new Error(`Strava API request failed: ${response.status} ${await response.text()}`);
+      throw new Error(
+        `Strava API request failed: ${response.status} ${await response.text()}${formatRateLimitStatus(
+          this.rateLimitStatus,
+        )}`,
+      );
     }
 
     return response.json();
@@ -231,4 +357,76 @@ export class StravaClient {
 
     return response.json();
   }
+
+  /**
+   * Fail before calling Strava when the copied auth callback proves a required scope is absent.
+   *
+   * Scopes are optional in config because older local setups may not have recorded the callback URL.
+   */
+  private requireScopes(requiredScopes: string[]) {
+    if (!this.env.grantedScopes?.length) return;
+
+    const missing = requiredScopes.filter((scope) => !this.env.grantedScopes?.includes(scope));
+    if (!missing.length) return;
+
+    throw new Error(`Missing Strava OAuth scope(s): ${missing.join(", ")}. Re-run auth with the required scope(s).`);
+  }
+}
+
+/** Parse a Strava limit header value like `200,2000` or usage value like `14,91`. */
+function parseLimitPair(value: string | null): [number, number] | undefined {
+  if (!value) return undefined;
+
+  const [shortWindow, dayWindow] = value.split(",").map((part) => Number(part));
+  if (!Number.isFinite(shortWindow) || !Number.isFinite(dayWindow)) return undefined;
+
+  return [shortWindow, dayWindow];
+}
+
+/** Capture Strava's standard overall and read-specific rate-limit headers. */
+function parseRateLimitHeaders(headers: Headers): RateLimitStatus | undefined {
+  const overallLimit = parseLimitPair(headers.get("x-ratelimit-limit"));
+  const overallUsage = parseLimitPair(headers.get("x-ratelimit-usage"));
+  const readLimit = parseLimitPair(headers.get("x-readratelimit-limit"));
+  const readUsage = parseLimitPair(headers.get("x-readratelimit-usage"));
+
+  return {
+    overall:
+      overallLimit && overallUsage
+        ? {
+            shortWindow: {
+              limit: overallLimit[0],
+              usage: overallUsage[0],
+            },
+            day: {
+              limit: overallLimit[1],
+              usage: overallUsage[1],
+            },
+          }
+        : undefined,
+    read:
+      readLimit && readUsage
+        ? {
+            shortWindow: {
+              limit: readLimit[0],
+              usage: readUsage[0],
+            },
+            day: {
+              limit: readLimit[1],
+              usage: readUsage[1],
+            },
+          }
+        : undefined,
+  };
+}
+
+/** Add compact rate-limit context to API errors without exposing response payloads twice. */
+function formatRateLimitStatus(status: RateLimitStatus | undefined): string {
+  const parts = [];
+  if (status?.overall) {
+    parts.push(`overall ${status.overall.shortWindow.usage}/${status.overall.shortWindow.limit}`);
+  }
+  if (status?.read) parts.push(`read ${status.read.shortWindow.usage}/${status.read.shortWindow.limit}`);
+
+  return parts.length ? `; rate limit: ${parts.join(", ")}` : "";
 }

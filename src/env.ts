@@ -15,6 +15,8 @@ export type StravaEnv = {
   refreshToken: string;
   /** Optional JSON cache path that becomes the source of truth after Strava rotates refresh tokens. */
   tokenFile?: string;
+  /** Optional granted OAuth scopes from the auth callback; used for clearer endpoint errors. */
+  grantedScopes?: string[];
 };
 
 /**
@@ -28,7 +30,18 @@ export function getStravaEnv(): StravaEnv {
     clientSecret: requireEnv("STRAVA_CLIENT_SECRET"),
     refreshToken: requireEnv("STRAVA_REFRESH_TOKEN"),
     tokenFile: process.env.STRAVA_TOKEN_FILE,
+    grantedScopes: parseScopes(process.env.STRAVA_GRANTED_SCOPES),
   };
+}
+
+/** Parse comma- or space-separated OAuth scopes copied from Strava's callback URL. */
+function parseScopes(value: string | undefined): string[] | undefined {
+  const scopes = value
+    ?.split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+
+  return scopes?.length ? scopes : undefined;
 }
 
 /**
