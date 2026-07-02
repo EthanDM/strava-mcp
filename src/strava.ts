@@ -126,6 +126,7 @@ export class StravaClient {
     const maxPages = input.maxPages ?? 20;
 
     for (let page = 1; page <= maxPages; page += 1) {
+      this.assertReadRateLimitAvailable();
       const batch = (await this.getRecentActivities({
         after: input.after,
         before: input.before,
@@ -370,6 +371,23 @@ export class StravaClient {
     if (!missing.length) return;
 
     throw new Error(`Missing Strava OAuth scope(s): ${missing.join(", ")}. Re-run auth with the required scope(s).`);
+  }
+
+  /**
+   * Stop paginated backfills before the next request would likely cross Strava's short read window.
+   *
+   * Strava still counts rejected short-window requests toward daily usage, so the client fails fast instead of
+   * probing into a 429.
+   */
+  private assertReadRateLimitAvailable() {
+    const readWindow = this.rateLimitStatus?.read?.shortWindow;
+    if (!readWindow?.limit) return;
+
+    if (readWindow.usage / readWindow.limit < 0.95) return;
+
+    throw new Error(
+      `Strava read rate limit is near exhausted (${readWindow.usage}/${readWindow.limit}). Retry after the next 15-minute boundary.`,
+    );
   }
 }
 

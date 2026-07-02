@@ -2,6 +2,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import {
+  getActivityCacheStatus,
+  getCachedActivities,
+  getCoveredBefore,
+  isRangeCovered,
+  loadActivityCache,
+  recordSyncWindow,
+  resolveActivityRange,
+  saveActivityCache,
+  type ActivityRange,
+  type ActivitySource,
+  upsertActivities,
+} from "./activity-cache.js";
 import { exportActivities, searchActivities, summarizeActivities, summarizeGearUsage } from "./analysis.js";
 import { getStravaEnv } from "./env.js";
 import { StravaClient } from "./strava.js";
@@ -172,6 +185,57 @@ server.registerTool(
   async () => jsonResult(strava.getRateLimitStatus()),
 );
 
+server.registerTool(
+  "strava_sync_activities",
+  {
+    description: "Fetch bounded Strava activity history into the local ignored activity cache.",
+    inputSchema: {
+      after: z
+        .number()
+        .int()
+        .positive()
+        .describe("Unix timestamp lower bound for the sync window."),
+      before: z.number().int().positive().optional().describe("Optional Unix timestamp upper bound."),
+      maxPages: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe("Maximum Strava activity-list pages to fetch. Defaults to 20."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+  },
+  async ({ after, before, maxPages }) => jsonResult(await syncActivities({ after, before }, maxPages)),
+);
+
+server.registerTool(
+  "strava_cache_status",
+  {
+    description: "Show local Strava activity cache coverage and metadata.",
+    annotations: {
+      readOnlyHint: true,
+    },
+  },
+  async () => {
+    const cache = await loadActivityCache();
+    return jsonResult({
+      ...getActivityCacheStatus(cache),
+      rateLimitStatus: strava.getRateLimitStatus(),
+    });
+  },
+);
+
+const activitySourceSchema = z
+  .enum(["cache_then_api", "cache", "api"])
+  .optional()
+  .describe("Activity source. Defaults to cache_then_api.");
+const OPEN_ENDED_CACHE_FRESH_SECONDS = 15 * 60;
+
 const activityFilterSchema = {
   after: z
     .number()
@@ -191,6 +255,7 @@ const activityFilterSchema = {
     .max(50)
     .optional()
     .describe("Maximum Strava activity-list pages to fetch. Defaults to 20."),
+  source: activitySourceSchema,
 };
 
 server.registerTool(
@@ -206,8 +271,8 @@ server.registerTool(
       readOnlyHint: true,
     },
   },
-  async ({ maxPages, ...input }) => {
-    const activities = await strava.fetchActivities(inputWithMaxPages(input.after, input.before, maxPages));
+  async ({ maxPages, source, ...input }) => {
+    const activities = await resolveActivities(input, source, maxPages);
     return jsonResult(summarizeActivities(activities, input));
   },
 );
@@ -221,8 +286,8 @@ server.registerTool(
       readOnlyHint: true,
     },
   },
-  async ({ maxPages, ...input }) => {
-    const activities = await strava.fetchActivities(inputWithMaxPages(input.after, input.before, maxPages));
+  async ({ maxPages, source, ...input }) => {
+    const activities = await resolveActivities(input, source, maxPages);
     return jsonResult(summarizeGearUsage(activities, input));
   },
 );
@@ -243,8 +308,8 @@ server.registerTool(
       readOnlyHint: true,
     },
   },
-  async ({ maxPages, ...input }) => {
-    const activities = await strava.fetchActivities(inputWithMaxPages(input.after, input.before, maxPages));
+  async ({ maxPages, source, ...input }) => {
+    const activities = await resolveActivities(input, source, maxPages);
     return jsonResult(searchActivities(activities, input));
   },
 );
@@ -260,8 +325,8 @@ server.registerTool(
       idempotentHint: false,
     },
   },
-  async ({ maxPages, ...input }) => {
-    const activities = await strava.fetchActivities(inputWithMaxPages(input.after, input.before, maxPages));
+  async ({ maxPages, source, ...input }) => {
+    const activities = await resolveActivities(input, source, maxPages);
     return jsonResult(await exportActivities(activities, input));
   },
 );
@@ -284,6 +349,63 @@ function inputWithMaxPages(after: number, before: number | undefined, maxPages: 
     after,
     before,
     maxPages,
+  };
+}
+
+/** Resolve bounded activity history from cache, Strava, or cache-backed sync depending on caller intent. */
+async function resolveActivities(
+  input: ActivityRange,
+  source: ActivitySource | undefined,
+  maxPages: number | undefined,
+) {
+  const selectedSource = source ?? "cache_then_api";
+  const range = resolveActivityRange(input);
+
+  if (selectedSource === "api") {
+    return strava.fetchActivities(inputWithMaxPages(range.after, range.before, maxPages));
+  }
+
+  const cache = await loadActivityCache();
+  const coveredBefore = getCoveredBefore(cache, range.after);
+  const cacheRange =
+    input.before === undefined && coveredBefore > range.after ? { after: range.after, before: coveredBefore } : range;
+  if (isRangeCovered(cache, cacheRange) && (input.before !== undefined || selectedSource === "cache")) {
+    return getCachedActivities(cache, cacheRange);
+  }
+  if (
+    input.before === undefined &&
+    selectedSource === "cache_then_api" &&
+    isRangeCovered(cache, cacheRange) &&
+    range.before - cacheRange.before <= OPEN_ENDED_CACHE_FRESH_SECONDS
+  ) {
+    return getCachedActivities(cache, cacheRange);
+  }
+
+  if (selectedSource === "cache") {
+    throw new Error(
+      `Local Strava activity cache does not cover ${range.after}-${range.before}. Run strava_sync_activities or use source=cache_then_api.`,
+    );
+  }
+
+  const syncAfter = coveredBefore > range.after ? coveredBefore : range.after;
+  await syncActivities({ after: syncAfter, before: range.before }, maxPages);
+  return getCachedActivities(await loadActivityCache(), range);
+}
+
+/** Fetch a bounded activity range, merge it into the local cache, and return sync metadata. */
+async function syncActivities(input: ActivityRange, maxPages: number | undefined) {
+  const range = resolveActivityRange(input);
+  const activities = await strava.fetchActivities(inputWithMaxPages(range.after, range.before, maxPages));
+  const cache = await loadActivityCache();
+  const changed = upsertActivities(cache, activities);
+  recordSyncWindow(cache, range, activities.length);
+  await saveActivityCache(cache);
+
+  return {
+    fetchedCount: activities.length,
+    upsertedCount: changed,
+    ...getActivityCacheStatus(cache),
+    rateLimitStatus: strava.getRateLimitStatus(),
   };
 }
 
