@@ -74,6 +74,18 @@ export type ActivityStreamsInput = {
   keys?: string[];
   /** Keep enabled when callers want stable object keys instead of positional stream arrays. */
   keyByType?: boolean;
+  /** Optional point cap per stream; omitted preserves Strava's raw stream payload. */
+  maxPoints?: number;
+  /** Include the raw stream payload alongside compacted output when `maxPoints` is set. */
+  includeRaw?: boolean;
+};
+
+/** Metadata describing how one stream was compacted for MCP output. */
+type CompactedStreamMetadata = {
+  type: string;
+  originalPoints: number;
+  returnedPoints: number;
+  downsampled: boolean;
 };
 
 /**
@@ -185,7 +197,13 @@ export class StravaClient {
       key_by_type: String(input.keyByType ?? true),
     });
 
-    return this.get(`/activities/${input.id}/streams?${params.toString()}`);
+    const streams = await this.get(`/activities/${input.id}/streams?${params.toString()}`);
+
+    if (!input.maxPoints) {
+      return streams;
+    }
+
+    return compactStreams(streams, input.maxPoints, input.includeRaw ?? false);
   }
 
   /**
@@ -389,6 +407,75 @@ export class StravaClient {
       `Strava read rate limit is near exhausted (${readWindow.usage}/${readWindow.limit}). Retry after the next 15-minute boundary.`,
     );
   }
+}
+
+/** Return compact stream data plus per-stream point counts while preserving raw output when requested. */
+function compactStreams(streams: unknown, maxPoints: number, includeRaw: boolean) {
+  const metadata: CompactedStreamMetadata[] = [];
+  const compacted = Array.isArray(streams)
+    ? streams.map((stream, index) => compactStream(stream, String(index), maxPoints, metadata))
+    : Object.fromEntries(
+        Object.entries(streams as Record<string, unknown>).map(([type, stream]) => [
+          type,
+          compactStream(stream, type, maxPoints, metadata),
+        ]),
+      );
+
+  return {
+    streams: compacted,
+    metadata,
+    ...(includeRaw ? { rawStreams: streams } : {}),
+  };
+}
+
+/** Compact only the `data` array; keep Strava's surrounding stream fields intact for caller compatibility. */
+function compactStream(
+  stream: unknown,
+  fallbackType: string,
+  maxPoints: number,
+  metadata: CompactedStreamMetadata[],
+): unknown {
+  if (!stream || typeof stream !== "object" || !Array.isArray((stream as { data?: unknown }).data)) {
+    metadata.push({
+      type: fallbackType,
+      originalPoints: 0,
+      returnedPoints: 0,
+      downsampled: false,
+    });
+    return stream;
+  }
+
+  const typedStream = stream as { type?: string; data: unknown[] };
+  const data = downsampleEvenly(typedStream.data, maxPoints);
+
+  metadata.push({
+    type: typedStream.type ?? fallbackType,
+    originalPoints: typedStream.data.length,
+    returnedPoints: data.length,
+    downsampled: data.length < typedStream.data.length,
+  });
+
+  return {
+    ...typedStream,
+    data,
+  };
+}
+
+/** Evenly sample arrays while retaining endpoints so long activities keep their full span. */
+function downsampleEvenly<T>(values: T[], maxPoints: number): T[] {
+  if (values.length <= maxPoints) return values;
+  if (maxPoints <= 1) return values.slice(0, 1);
+
+  const lastIndex = values.length - 1;
+  const indexes = new Set<number>();
+
+  for (let index = 0; index < maxPoints; index += 1) {
+    indexes.add(Math.round((index * lastIndex) / (maxPoints - 1)));
+  }
+
+  return Array.from(indexes)
+    .sort((a, b) => a - b)
+    .map((index) => values[index]);
 }
 
 /** Parse a Strava limit header value like `200,2000` or usage value like `14,91`. */

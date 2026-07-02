@@ -99,6 +99,16 @@ server.registerTool(
         .optional()
         .describe("Optional stream keys. Defaults to time,distance,altitude,heartrate,cadence,watts,latlng."),
       keyByType: z.boolean().optional().describe("Return streams keyed by type. Defaults to true."),
+      maxPoints: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Optional maximum points per stream. Omit for Strava's full raw stream payload."),
+      includeRaw: z
+        .boolean()
+        .optional()
+        .describe("When maxPoints is set, also include the full raw stream payload. Defaults to false."),
     },
     annotations: {
       readOnlyHint: true,
@@ -227,6 +237,36 @@ server.registerTool(
       ...getActivityCacheStatus(cache),
       rateLimitStatus: strava.getRateLimitStatus(),
     });
+  },
+);
+
+server.registerResource(
+  "strava-cache-status",
+  "strava://cache/status",
+  {
+    title: "Strava Cache Status",
+    description: "Metadata-only status for the local Strava activity cache and latest observed rate limits.",
+    mimeType: "application/json",
+  },
+  async (uri) => {
+    const cache = await loadActivityCache();
+
+    return {
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: "application/json",
+          text: JSON.stringify(
+            {
+              ...getActivityCacheStatus(cache),
+              rateLimitStatus: strava.getRateLimitStatus(),
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    };
   },
 );
 
