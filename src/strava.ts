@@ -1,4 +1,5 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { StravaActivity } from "./analysis.js";
 import type { StravaEnv } from "./env.js";
@@ -133,7 +134,9 @@ export class StravaClient {
    *
    * @throws Error when token refresh fails, Strava rejects a page, or `maxPages` is exhausted.
    */
-  async fetchActivities(input: FetchActivitiesInput): Promise<StravaActivity[]> {
+  async fetchActivities(
+    input: FetchActivitiesInput,
+  ): Promise<StravaActivity[]> {
     const activities: StravaActivity[] = [];
     const maxPages = input.maxPages ?? 20;
 
@@ -153,7 +156,9 @@ export class StravaClient {
       }
     }
 
-    throw new Error(`Stopped after ${maxPages} pages; narrow the date range or raise maxPages.`);
+    throw new Error(
+      `Stopped after ${maxPages} pages; narrow the date range or raise maxPages.`,
+    );
   }
 
   /**
@@ -190,14 +195,24 @@ export class StravaClient {
 
     const keys = input.keys?.length
       ? input.keys
-      : ["time", "distance", "altitude", "heartrate", "cadence", "watts", "latlng"];
+      : [
+          "time",
+          "distance",
+          "altitude",
+          "heartrate",
+          "cadence",
+          "watts",
+          "latlng",
+        ];
 
     const params = new URLSearchParams({
       keys: keys.join(","),
       key_by_type: String(input.keyByType ?? true),
     });
 
-    const streams = await this.get(`/activities/${input.id}/streams?${params.toString()}`);
+    const streams = await this.get(
+      `/activities/${input.id}/streams?${params.toString()}`,
+    );
 
     if (!input.maxPoints) {
       return streams;
@@ -316,12 +331,14 @@ export class StravaClient {
    * @throws Error when the configured cache exists but cannot be read or parsed.
    */
   private async loadStoredToken() {
-    if (this.loadedTokenFile || !this.env.tokenFile) return;
+    if (this.loadedTokenFile) return;
 
     this.loadedTokenFile = true;
 
     try {
-      const stored = JSON.parse(await readFile(this.env.tokenFile, "utf8")) as StoredToken;
+      const stored = JSON.parse(
+        await readFile(this.env.tokenFile, "utf8"),
+      ) as StoredToken;
       this.accessToken = stored.accessToken;
       this.refreshToken = stored.refreshToken;
       this.expiresAt = stored.expiresAt ?? 0;
@@ -338,17 +355,20 @@ export class StravaClient {
    * @throws Error when the configured cache path cannot be written.
    */
   private async saveStoredToken() {
-    if (!this.env.tokenFile) return;
-
     const stored: StoredToken = {
       accessToken: this.accessToken,
       refreshToken: this.refreshToken,
       expiresAt: this.expiresAt,
     };
 
-    await writeFile(this.env.tokenFile, `${JSON.stringify(stored, null, 2)}\n`, {
-      mode: 0o600,
-    });
+    await mkdir(dirname(this.env.tokenFile), { recursive: true });
+    await writeFile(
+      this.env.tokenFile,
+      `${JSON.stringify(stored, null, 2)}\n`,
+      {
+        mode: 0o600,
+      },
+    );
   }
 
   /**
@@ -371,7 +391,9 @@ export class StravaClient {
     });
 
     if (!response.ok) {
-      throw new Error(`Strava token refresh failed: ${response.status} ${await response.text()}`);
+      throw new Error(
+        `Strava token refresh failed: ${response.status} ${await response.text()}`,
+      );
     }
 
     return response.json();
@@ -385,10 +407,14 @@ export class StravaClient {
   private requireScopes(requiredScopes: string[]) {
     if (!this.env.grantedScopes?.length) return;
 
-    const missing = requiredScopes.filter((scope) => !this.env.grantedScopes?.includes(scope));
+    const missing = requiredScopes.filter(
+      (scope) => !this.env.grantedScopes?.includes(scope),
+    );
     if (!missing.length) return;
 
-    throw new Error(`Missing Strava OAuth scope(s): ${missing.join(", ")}. Re-run auth with the required scope(s).`);
+    throw new Error(
+      `Missing Strava OAuth scope(s): ${missing.join(", ")}. Re-run auth with the required scope(s).`,
+    );
   }
 
   /**
@@ -410,15 +436,23 @@ export class StravaClient {
 }
 
 /** Return compact stream data plus per-stream point counts while preserving raw output when requested. */
-function compactStreams(streams: unknown, maxPoints: number, includeRaw: boolean) {
+function compactStreams(
+  streams: unknown,
+  maxPoints: number,
+  includeRaw: boolean,
+) {
   const metadata: CompactedStreamMetadata[] = [];
   const compacted = Array.isArray(streams)
-    ? streams.map((stream, index) => compactStream(stream, String(index), maxPoints, metadata))
+    ? streams.map((stream, index) =>
+        compactStream(stream, String(index), maxPoints, metadata),
+      )
     : Object.fromEntries(
-        Object.entries(streams as Record<string, unknown>).map(([type, stream]) => [
-          type,
-          compactStream(stream, type, maxPoints, metadata),
-        ]),
+        Object.entries(streams as Record<string, unknown>).map(
+          ([type, stream]) => [
+            type,
+            compactStream(stream, type, maxPoints, metadata),
+          ],
+        ),
       );
 
   return {
@@ -435,7 +469,11 @@ function compactStream(
   maxPoints: number,
   metadata: CompactedStreamMetadata[],
 ): unknown {
-  if (!stream || typeof stream !== "object" || !Array.isArray((stream as { data?: unknown }).data)) {
+  if (
+    !stream ||
+    typeof stream !== "object" ||
+    !Array.isArray((stream as { data?: unknown }).data)
+  ) {
     metadata.push({
       type: fallbackType,
       originalPoints: 0,
@@ -483,7 +521,8 @@ function parseLimitPair(value: string | null): [number, number] | undefined {
   if (!value) return undefined;
 
   const [shortWindow, dayWindow] = value.split(",").map((part) => Number(part));
-  if (!Number.isFinite(shortWindow) || !Number.isFinite(dayWindow)) return undefined;
+  if (!Number.isFinite(shortWindow) || !Number.isFinite(dayWindow))
+    return undefined;
 
   return [shortWindow, dayWindow];
 }
@@ -529,9 +568,14 @@ function parseRateLimitHeaders(headers: Headers): RateLimitStatus | undefined {
 function formatRateLimitStatus(status: RateLimitStatus | undefined): string {
   const parts = [];
   if (status?.overall) {
-    parts.push(`overall ${status.overall.shortWindow.usage}/${status.overall.shortWindow.limit}`);
+    parts.push(
+      `overall ${status.overall.shortWindow.usage}/${status.overall.shortWindow.limit}`,
+    );
   }
-  if (status?.read) parts.push(`read ${status.read.shortWindow.usage}/${status.read.shortWindow.limit}`);
+  if (status?.read)
+    parts.push(
+      `read ${status.read.shortWindow.usage}/${status.read.shortWindow.limit}`,
+    );
 
   return parts.length ? `; rate limit: ${parts.join(", ")}` : "";
 }

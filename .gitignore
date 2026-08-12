@@ -3,3 +3,5 @@ dist/
 .env
 .strava-token.json
 exports/
+.DS_Store
+coverage/

@@ -27,7 +27,10 @@ describe("activity cache coverage", () => {
     recordSyncWindow(activityCache, { after: 200, before: 300 }, 1);
 
     assert.equal(getCoveredBefore(activityCache, 100), 300);
-    assert.equal(isRangeCovered(activityCache, { after: 100, before: 300 }), true);
+    assert.equal(
+      isRangeCovered(activityCache, { after: 100, before: 300 }),
+      true,
+    );
   });
 
   it("does not bridge gaps between sync windows", () => {
@@ -36,7 +39,10 @@ describe("activity cache coverage", () => {
     recordSyncWindow(activityCache, { after: 200, before: 300 }, 1);
 
     assert.equal(getCoveredBefore(activityCache, 100), 150);
-    assert.equal(isRangeCovered(activityCache, { after: 100, before: 300 }), false);
+    assert.equal(
+      isRangeCovered(activityCache, { after: 100, before: 300 }),
+      false,
+    );
   });
 
   it("resolves open-ended ranges to a concrete timestamp", () => {

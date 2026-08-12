@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { config } from "dotenv";
@@ -13,8 +15,8 @@ export type StravaEnv = {
   clientSecret: string;
   /** Initial refresh token from the one-time OAuth approval flow. */
   refreshToken: string;
-  /** Optional JSON cache path that becomes the source of truth after Strava rotates refresh tokens. */
-  tokenFile?: string;
+  /** JSON cache path that becomes the source of truth after Strava rotates refresh tokens. */
+  tokenFile: string;
   /** Optional granted OAuth scopes from the auth callback; used for clearer endpoint errors. */
   grantedScopes?: string[];
 };
@@ -29,9 +31,19 @@ export function getStravaEnv(): StravaEnv {
     clientId: requireEnv("STRAVA_CLIENT_ID"),
     clientSecret: requireEnv("STRAVA_CLIENT_SECRET"),
     refreshToken: requireEnv("STRAVA_REFRESH_TOKEN"),
-    tokenFile: process.env.STRAVA_TOKEN_FILE,
+    tokenFile:
+      process.env.STRAVA_TOKEN_FILE?.trim() ||
+      join(getStravaDataDir(), "auth.json"),
     grantedScopes: parseScopes(process.env.STRAVA_GRANTED_SCOPES),
   };
+}
+
+/** Return the private local directory used for credentials, cache data, and exports. */
+export function getStravaDataDir() {
+  return (
+    process.env.STRAVA_DATA_DIR?.trim() ||
+    join(homedir(), ".config", "strava-mcp")
+  );
 }
 
 /** Parse comma- or space-separated OAuth scopes copied from Strava's callback URL. */

@@ -1,13 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { filterActivities, type StravaActivity } from "./analysis.js";
+import { getStravaDataDir } from "./env.js";
 
 const CACHE_SCHEMA_VERSION = 1;
 
-/** Package-local cache path; `exports/` is ignored so private Strava history stays out of git. */
-export const ACTIVITY_CACHE_PATH = fileURLToPath(new URL("../exports/cache/activities.json", import.meta.url));
+/** Private local cache path, outside the repository so activity history cannot be committed accidentally. */
+export const ACTIVITY_CACHE_PATH = `${getStravaDataDir()}/cache/activities.json`;
 
 /** Cache-backed tools either trust local history, force Strava, or fill gaps before analysis. */
 export type ActivitySource = "cache_then_api" | "cache" | "api";
@@ -47,9 +47,13 @@ export type ActivityCacheStatus = {
 /** Load the cache, returning an empty schema-compatible document when it has not been created yet. */
 export async function loadActivityCache(): Promise<ActivityCache> {
   try {
-    const parsed = JSON.parse(await readFile(ACTIVITY_CACHE_PATH, "utf8")) as ActivityCache;
+    const parsed = JSON.parse(
+      await readFile(ACTIVITY_CACHE_PATH, "utf8"),
+    ) as ActivityCache;
     if (parsed.schemaVersion !== CACHE_SCHEMA_VERSION) {
-      throw new Error(`Unsupported Strava activity cache schema version: ${parsed.schemaVersion}`);
+      throw new Error(
+        `Unsupported Strava activity cache schema version: ${parsed.schemaVersion}`,
+      );
     }
 
     return {
@@ -78,7 +82,10 @@ export async function saveActivityCache(cache: ActivityCache) {
 }
 
 /** Upsert activities by Strava id and return how many rows were inserted or replaced. */
-export function upsertActivities(cache: ActivityCache, activities: StravaActivity[]): number {
+export function upsertActivities(
+  cache: ActivityCache,
+  activities: StravaActivity[],
+): number {
   let changed = 0;
 
   for (const activity of activities) {
@@ -94,7 +101,11 @@ export function upsertActivities(cache: ActivityCache, activities: StravaActivit
 }
 
 /** Record a completed API sync window after all fetched activities have been merged. */
-export function recordSyncWindow(cache: ActivityCache, range: Required<ActivityRange>, count: number) {
+export function recordSyncWindow(
+  cache: ActivityCache,
+  range: Required<ActivityRange>,
+  count: number,
+) {
   cache.syncWindows.push({
     after: range.after,
     before: range.before,
@@ -105,7 +116,10 @@ export function recordSyncWindow(cache: ActivityCache, range: Required<ActivityR
 }
 
 /** Return true when any completed sync window fully covers the requested range. */
-export function isRangeCovered(cache: ActivityCache, range: Required<ActivityRange>): boolean {
+export function isRangeCovered(
+  cache: ActivityCache,
+  range: Required<ActivityRange>,
+): boolean {
   return getCoveredBefore(cache, range.after) >= range.before;
 }
 
@@ -129,13 +143,22 @@ export function getCoveredBefore(cache: ActivityCache, after: number): number {
 }
 
 /** Return cached activities in the requested range, newest first. */
-export function getCachedActivities(cache: ActivityCache, range: Required<ActivityRange>): StravaActivity[] {
-  return filterActivities(Object.values(cache.activitiesById), range).sort(compareActivityNewestFirst);
+export function getCachedActivities(
+  cache: ActivityCache,
+  range: Required<ActivityRange>,
+): StravaActivity[] {
+  return filterActivities(Object.values(cache.activitiesById), range).sort(
+    compareActivityNewestFirst,
+  );
 }
 
 /** Summarize cache contents without exposing all activity payloads. */
-export function getActivityCacheStatus(cache: ActivityCache): ActivityCacheStatus {
-  const activities = Object.values(cache.activitiesById).sort(compareActivityOldestFirst);
+export function getActivityCacheStatus(
+  cache: ActivityCache,
+): ActivityCacheStatus {
+  const activities = Object.values(cache.activitiesById).sort(
+    compareActivityOldestFirst,
+  );
 
   return {
     cachePath: ACTIVITY_CACHE_PATH,
@@ -148,7 +171,9 @@ export function getActivityCacheStatus(cache: ActivityCache): ActivityCacheStatu
 }
 
 /** Resolve an open-ended request to the current moment so cache windows never claim future coverage. */
-export function resolveActivityRange(range: ActivityRange): Required<ActivityRange> {
+export function resolveActivityRange(
+  range: ActivityRange,
+): Required<ActivityRange> {
   return {
     after: range.after,
     before: range.before ?? Math.floor(Date.now() / 1000),
@@ -166,17 +191,25 @@ function emptyActivityCache(): ActivityCache {
 }
 
 /** Sort by canonical Strava start time newest first; missing dates sink to the bottom. */
-function compareActivityNewestFirst(a: StravaActivity, b: StravaActivity): number {
+function compareActivityNewestFirst(
+  a: StravaActivity,
+  b: StravaActivity,
+): number {
   return activityStartMillis(b) - activityStartMillis(a);
 }
 
 /** Sort by canonical Strava start time oldest first; missing dates sink to the top. */
-function compareActivityOldestFirst(a: StravaActivity, b: StravaActivity): number {
+function compareActivityOldestFirst(
+  a: StravaActivity,
+  b: StravaActivity,
+): number {
   return activityStartMillis(a) - activityStartMillis(b);
 }
 
 /** Use Strava's UTC start when present so cache ordering matches range filtering. */
-function activityStartDate(activity: StravaActivity | undefined): string | undefined {
+function activityStartDate(
+  activity: StravaActivity | undefined,
+): string | undefined {
   return activity?.start_date ?? activity?.start_date_local;
 }
 

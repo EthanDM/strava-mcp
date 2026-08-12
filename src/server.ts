@@ -15,7 +15,12 @@ import {
   type ActivitySource,
   upsertActivities,
 } from "./activity-cache.js";
-import { exportActivities, searchActivities, summarizeActivities, summarizeGearUsage } from "./analysis.js";
+import {
+  exportActivities,
+  searchActivities,
+  summarizeActivities,
+  summarizeGearUsage,
+} from "./analysis.js";
 import { getStravaEnv } from "./env.js";
 import { StravaClient } from "./strava.js";
 
@@ -45,7 +50,12 @@ server.registerTool(
         .positive()
         .optional()
         .describe("Unix timestamp. Return activities after this time."),
-      page: z.number().int().positive().optional().describe("Result page. Defaults to 1."),
+      page: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Result page. Defaults to 1."),
       perPage: z
         .number()
         .int()
@@ -78,13 +88,17 @@ server.registerTool(
     description: "Fetch detailed data for one Strava activity.",
     inputSchema: {
       id: z.number().int().positive().describe("Strava activity id."),
-      includeAllEfforts: z.boolean().optional().describe("Include all segment efforts when Strava exposes them."),
+      includeAllEfforts: z
+        .boolean()
+        .optional()
+        .describe("Include all segment efforts when Strava exposes them."),
     },
     annotations: {
       readOnlyHint: true,
     },
   },
-  async ({ id, includeAllEfforts }) => jsonResult(await strava.getActivity(id, includeAllEfforts)),
+  async ({ id, includeAllEfforts }) =>
+    jsonResult(await strava.getActivity(id, includeAllEfforts)),
 );
 
 server.registerTool(
@@ -97,18 +111,27 @@ server.registerTool(
       keys: z
         .array(z.string())
         .optional()
-        .describe("Optional stream keys. Defaults to time,distance,altitude,heartrate,cadence,watts,latlng."),
-      keyByType: z.boolean().optional().describe("Return streams keyed by type. Defaults to true."),
+        .describe(
+          "Optional stream keys. Defaults to time,distance,altitude,heartrate,cadence,watts,latlng.",
+        ),
+      keyByType: z
+        .boolean()
+        .optional()
+        .describe("Return streams keyed by type. Defaults to true."),
       maxPoints: z
         .number()
         .int()
         .min(1)
         .optional()
-        .describe("Optional maximum points per stream. Omit for Strava's full raw stream payload."),
+        .describe(
+          "Optional maximum points per stream. Omit for Strava's full raw stream payload.",
+        ),
       includeRaw: z
         .boolean()
         .optional()
-        .describe("When maxPoints is set, also include the full raw stream payload. Defaults to false."),
+        .describe(
+          "When maxPoints is set, also include the full raw stream payload. Defaults to false.",
+        ),
     },
     annotations: {
       readOnlyHint: true,
@@ -148,7 +171,8 @@ server.registerTool(
 server.registerTool(
   "strava_athlete_zones",
   {
-    description: "Fetch the authenticated athlete's heart-rate and power zones.",
+    description:
+      "Fetch the authenticated athlete's heart-rate and power zones.",
     annotations: {
       readOnlyHint: true,
     },
@@ -187,7 +211,8 @@ server.registerTool(
 server.registerTool(
   "strava_rate_limit_status",
   {
-    description: "Show Strava API rate-limit headers last observed by this MCP process.",
+    description:
+      "Show Strava API rate-limit headers last observed by this MCP process.",
     annotations: {
       readOnlyHint: true,
     },
@@ -198,21 +223,29 @@ server.registerTool(
 server.registerTool(
   "strava_sync_activities",
   {
-    description: "Fetch bounded Strava activity history into the local ignored activity cache.",
+    description:
+      "Fetch bounded Strava activity history into the local ignored activity cache.",
     inputSchema: {
       after: z
         .number()
         .int()
         .positive()
         .describe("Unix timestamp lower bound for the sync window."),
-      before: z.number().int().positive().optional().describe("Optional Unix timestamp upper bound."),
+      before: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Optional Unix timestamp upper bound."),
       maxPages: z
         .number()
         .int()
         .min(1)
         .max(50)
         .optional()
-        .describe("Maximum Strava activity-list pages to fetch. Defaults to 20."),
+        .describe(
+          "Maximum Strava activity-list pages to fetch. Defaults to 20.",
+        ),
     },
     annotations: {
       readOnlyHint: false,
@@ -220,7 +253,8 @@ server.registerTool(
       idempotentHint: false,
     },
   },
-  async ({ after, before, maxPages }) => jsonResult(await syncActivities({ after, before }, maxPages)),
+  async ({ after, before, maxPages }) =>
+    jsonResult(await syncActivities({ after, before }, maxPages)),
 );
 
 server.registerTool(
@@ -245,7 +279,8 @@ server.registerResource(
   "strava://cache/status",
   {
     title: "Strava Cache Status",
-    description: "Metadata-only status for the local Strava activity cache and latest observed rate limits.",
+    description:
+      "Metadata-only status for the local Strava activity cache and latest observed rate limits.",
     mimeType: "application/json",
   },
   async (uri) => {
@@ -281,13 +316,25 @@ const activityFilterSchema = {
     .number()
     .int()
     .positive()
-    .describe("Unix timestamp lower bound. Required so summaries do not accidentally fetch full history."),
-  before: z.number().int().positive().optional().describe("Optional Unix timestamp upper bound."),
+    .describe(
+      "Unix timestamp lower bound. Required so summaries do not accidentally fetch full history.",
+    ),
+  before: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Optional Unix timestamp upper bound."),
   sportTypes: z
     .array(z.string())
     .optional()
-    .describe("Optional Strava sport_type allowlist, such as Run, TrailRun, Ride, or MountainBikeRide."),
-  gearIds: z.array(z.string()).optional().describe("Optional Strava gear_id allowlist."),
+    .describe(
+      "Optional Strava sport_type allowlist, such as Run, TrailRun, Ride, or MountainBikeRide.",
+    ),
+  gearIds: z
+    .array(z.string())
+    .optional()
+    .describe("Optional Strava gear_id allowlist."),
   maxPages: z
     .number()
     .int()
@@ -301,11 +348,17 @@ const activityFilterSchema = {
 server.registerTool(
   "strava_activity_summary",
   {
-    description: "Summarize activities by day, Monday-start week, or month for a bounded date range.",
+    description:
+      "Summarize activities by day, Monday-start week, or month for a bounded date range.",
     inputSchema: {
       ...activityFilterSchema,
-      groupBy: z.enum(["day", "week", "month"]).describe("Time bucket for grouped totals."),
-      includeEmptyBuckets: z.boolean().optional().describe("Include zero-mile buckets inside the date range."),
+      groupBy: z
+        .enum(["day", "week", "month"])
+        .describe("Time bucket for grouped totals."),
+      includeEmptyBuckets: z
+        .boolean()
+        .optional()
+        .describe("Include zero-mile buckets inside the date range."),
     },
     annotations: {
       readOnlyHint: true,
@@ -320,7 +373,8 @@ server.registerTool(
 server.registerTool(
   "strava_gear_usage",
   {
-    description: "Group activity mileage, hours, and elevation by gear id for service-interval audits.",
+    description:
+      "Group activity mileage, hours, and elevation by gear id for service-interval audits.",
     inputSchema: activityFilterSchema,
     annotations: {
       readOnlyHint: true,
@@ -335,14 +389,36 @@ server.registerTool(
 server.registerTool(
   "strava_activity_search",
   {
-    description: "Search bounded activity history by name, sport type, gear, distance, and elevation.",
+    description:
+      "Search bounded activity history by name, sport type, gear, distance, and elevation.",
     inputSchema: {
       ...activityFilterSchema,
-      query: z.string().optional().describe("Case-insensitive search over activity name and sport type."),
-      minDistanceMiles: z.number().nonnegative().optional().describe("Minimum activity distance in miles."),
-      maxDistanceMiles: z.number().nonnegative().optional().describe("Maximum activity distance in miles."),
-      minElevationFeet: z.number().nonnegative().optional().describe("Minimum elevation gain in feet."),
-      limit: z.number().int().min(1).max(100).optional().describe("Maximum compact rows returned. Defaults to 25."),
+      query: z
+        .string()
+        .optional()
+        .describe("Case-insensitive search over activity name and sport type."),
+      minDistanceMiles: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Minimum activity distance in miles."),
+      maxDistanceMiles: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Maximum activity distance in miles."),
+      minElevationFeet: z
+        .number()
+        .nonnegative()
+        .optional()
+        .describe("Minimum elevation gain in feet."),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Maximum compact rows returned. Defaults to 25."),
     },
     annotations: {
       readOnlyHint: true,
@@ -357,7 +433,8 @@ server.registerTool(
 server.registerTool(
   "strava_export_activities",
   {
-    description: "Export bounded activity history to ignored local raw JSON, compact JSON, and CSV audit files.",
+    description:
+      "Export bounded activity history to ignored local raw JSON, compact JSON, and CSV audit files.",
     inputSchema: activityFilterSchema,
     annotations: {
       readOnlyHint: false,
@@ -384,7 +461,11 @@ function jsonResult(data: unknown) {
 }
 
 /** Build the Strava page-fetch request while keeping local filters out of API parameters. */
-function inputWithMaxPages(after: number, before: number | undefined, maxPages: number | undefined) {
+function inputWithMaxPages(
+  after: number,
+  before: number | undefined,
+  maxPages: number | undefined,
+) {
   return {
     after,
     before,
@@ -402,14 +483,21 @@ async function resolveActivities(
   const range = resolveActivityRange(input);
 
   if (selectedSource === "api") {
-    return strava.fetchActivities(inputWithMaxPages(range.after, range.before, maxPages));
+    return strava.fetchActivities(
+      inputWithMaxPages(range.after, range.before, maxPages),
+    );
   }
 
   const cache = await loadActivityCache();
   const coveredBefore = getCoveredBefore(cache, range.after);
   const cacheRange =
-    input.before === undefined && coveredBefore > range.after ? { after: range.after, before: coveredBefore } : range;
-  if (isRangeCovered(cache, cacheRange) && (input.before !== undefined || selectedSource === "cache")) {
+    input.before === undefined && coveredBefore > range.after
+      ? { after: range.after, before: coveredBefore }
+      : range;
+  if (
+    isRangeCovered(cache, cacheRange) &&
+    (input.before !== undefined || selectedSource === "cache")
+  ) {
     return getCachedActivities(cache, cacheRange);
   }
   if (
@@ -433,9 +521,14 @@ async function resolveActivities(
 }
 
 /** Fetch a bounded activity range, merge it into the local cache, and return sync metadata. */
-async function syncActivities(input: ActivityRange, maxPages: number | undefined) {
+async function syncActivities(
+  input: ActivityRange,
+  maxPages: number | undefined,
+) {
   const range = resolveActivityRange(input);
-  const activities = await strava.fetchActivities(inputWithMaxPages(range.after, range.before, maxPages));
+  const activities = await strava.fetchActivities(
+    inputWithMaxPages(range.after, range.before, maxPages),
+  );
   const cache = await loadActivityCache();
   const changed = upsertActivities(cache, activities);
   recordSyncWindow(cache, range, activities.length);
