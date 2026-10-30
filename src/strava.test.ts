@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -73,6 +75,107 @@ describe("StravaClient", () => {
         refreshToken: "rotated-refresh-token",
         expiresAt,
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("coordinates concurrent clients using the same token file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "strava-mcp-test-"));
+    const tokenFile = join(directory, "auth.json");
+    const originalFetch = globalThis.fetch;
+    let refreshes = 0;
+    globalThis.fetch = async (input) => {
+      if (String(input) === "https://www.strava.com/oauth/token") {
+        refreshes += 1;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return Response.json({
+          access_token: "shared-access",
+          refresh_token: "rotated-refresh",
+          expires_at: Math.floor(Date.now() / 1000) + 3600,
+        });
+      }
+      return Response.json({ id: 123 });
+    };
+    try {
+      const first = new StravaClient(environment(tokenFile));
+      const second = new StravaClient(environment(tokenFile));
+      await Promise.all([
+        first.getAthleteProfile(),
+        second.getAthleteProfile(),
+      ]);
+      assert.equal(refreshes, 1);
+      assert.equal(
+        JSON.parse(await readFile(tokenFile, "utf8")).refreshToken,
+        "rotated-refresh",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes token refresh across separate server processes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "strava-mcp-process-"));
+    const tokenFile = join(directory, "auth.json");
+    const callsFile = join(directory, "refresh-calls");
+    const worker = `
+      import { appendFile } from "node:fs/promises";
+      import { StravaClient } from ${JSON.stringify(new URL("./strava.js", import.meta.url).href)};
+      const [tokenFile, callsFile] = process.argv.slice(1);
+      globalThis.fetch = async (input) => {
+        if (String(input).endsWith("/oauth/token")) {
+          await appendFile(callsFile, "refresh\\n");
+          await new Promise(resolve => setTimeout(resolve, 250));
+          return Response.json({access_token: "access", refresh_token: "rotated", expires_at: Math.floor(Date.now()/1000)+3600});
+        }
+        return Response.json({id: 1});
+      };
+      await new StravaClient({clientId:"id",clientSecret:"secret",refreshToken:"initial",tokenFile}).getAthleteProfile();
+    `;
+    try {
+      const run = promisify(execFile);
+      await Promise.all([
+        run(process.execPath, [
+          "--input-type=module",
+          "-e",
+          worker,
+          tokenFile,
+          callsFile,
+        ]),
+        run(process.execPath, [
+          "--input-type=module",
+          "-e",
+          worker,
+          tokenFile,
+          callsFile,
+        ]),
+      ]);
+      assert.equal(await readFile(callsFile, "utf8"), "refresh\n");
+      assert.equal(
+        JSON.parse(await readFile(tokenFile, "utf8")).refreshToken,
+        "rotated",
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the lock when a token exchange has an uncertain outcome", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "strava-mcp-test-"));
+    const tokenFile = join(directory, "auth.json");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("connection lost");
+    };
+    try {
+      const client = new StravaClient(environment(tokenFile));
+      await assert.rejects(client.getAthleteProfile(), /connection lost/);
+      assert.equal(
+        (await stat(`${tokenFile}.refresh-lock`)).isDirectory(),
+        true,
+      );
     } finally {
       globalThis.fetch = originalFetch;
       await rm(directory, { recursive: true, force: true });

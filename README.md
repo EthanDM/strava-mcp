@@ -142,6 +142,10 @@ Keep this read-only unless you intentionally add write scopes and write tools.
 
 `STRAVA_TOKEN_FILE` is optional. Strava can rotate refresh tokens, and the server writes the newest token to `STRAVA_DATA_DIR/auth.json` by default.
 
+Processes on the same machine using the same token file coordinate OAuth refreshes with an owner-only `auth.json.refresh-lock` directory. Token updates use atomic replacement. This does not coordinate clients on different machines or protect concurrent writes to other data.
+
+If a refresh is interrupted or fails after it starts, the lock is retained because Strava may already have rotated the token. Stop all clients, inspect the credential state, and reauthenticate if the current token cannot be established before removing the lock. Do not automatically delete an apparently stale lock; its presence may indicate an uncertain rotation. A busy lock times out after 30 seconds.
+
 `STRAVA_GRANTED_SCOPES` is optional but recommended. Copy the comma-separated `scope` value from the OAuth callback URL so scope errors fail locally with a clear message.
 
 Private local data lives outside the repository:

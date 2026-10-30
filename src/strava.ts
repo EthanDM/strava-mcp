@@ -1,4 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import {
+  mkdir,
+  readFile,
+  rename,
+  rmdir,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { StravaActivity } from "./analysis.js";
@@ -101,8 +109,6 @@ export class StravaClient {
   private expiresAt = 0;
   /** Newest known refresh token, initially from env and later from `tokenFile` or refresh responses. */
   private refreshToken: string;
-  /** Prevents repeatedly reading `tokenFile` on every tool call after startup. */
-  private loadedTokenFile = false;
   /** Last rate-limit snapshot observed on a Strava API response. */
   private rateLimitStatus: RateLimitStatus | undefined;
 
@@ -302,73 +308,97 @@ export class StravaClient {
     return response.json();
   }
 
-  /**
-   * Return a usable access token, refreshing and persisting rotated credentials when needed.
-   *
-   * @throws Error when the token cache is invalid JSON or Strava rejects the refresh token.
-   */
+  /** Return a usable token, coordinating refreshes with other local processes. */
   private async getAccessToken() {
-    await this.loadStoredToken();
+    if (this.hasUsableToken()) return this.accessToken!;
 
-    const now = Math.floor(Date.now() / 1000);
-
-    if (this.accessToken && this.expiresAt - 60 > now) {
-      return this.accessToken;
+    await mkdir(dirname(this.env.tokenFile), { recursive: true, mode: 0o700 });
+    const lock = `${this.env.tokenFile}.refresh-lock`;
+    const deadline = Date.now() + 30_000;
+    while (true) {
+      try {
+        await mkdir(lock, { mode: 0o700 });
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            "Strava refresh lock is busy or abandoned; inspect it before retrying",
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     }
 
-    const token = await this.refreshAccessToken();
-    this.accessToken = token.access_token;
-    this.expiresAt = token.expires_at;
-    this.refreshToken = token.refresh_token;
-    await this.saveStoredToken();
-
-    return this.accessToken;
+    let releaseLock = true;
+    try {
+      // Reload after acquiring the lock: another process may have rotated the token.
+      await this.loadStoredToken();
+      if (this.hasUsableToken()) return this.accessToken!;
+      // A failed or interrupted exchange may already have rotated the provider token.
+      releaseLock = false;
+      const token = await this.refreshAccessToken();
+      this.accessToken = token.access_token;
+      this.expiresAt = token.expires_at;
+      this.refreshToken = token.refresh_token;
+      try {
+        await this.saveStoredToken();
+        releaseLock = true;
+      } catch (error) {
+        // The provider may already have invalidated the old refresh token.
+        releaseLock = false;
+        this.accessToken = undefined;
+        throw error;
+      }
+      return this.accessToken;
+    } finally {
+      if (releaseLock) await rmdir(lock);
+    }
   }
 
-  /**
-   * Load the optional token cache once per process so refreshed tokens survive Codex restarts.
-   *
-   * @throws Error when the configured cache exists but cannot be read or parsed.
-   */
+  /** A cached access token is usable until one minute before expiry. */
+  private hasUsableToken() {
+    return Boolean(
+      this.accessToken && this.expiresAt - 60 > Math.floor(Date.now() / 1000),
+    );
+  }
+
+  /** Reload the shared token file while holding the refresh lock. */
   private async loadStoredToken() {
-    if (this.loadedTokenFile) return;
-
-    this.loadedTokenFile = true;
-
     try {
       const stored = JSON.parse(
         await readFile(this.env.tokenFile, "utf8"),
       ) as StoredToken;
+      if (typeof stored.refreshToken !== "string" || !stored.refreshToken) {
+        throw new Error("Invalid Strava token file: missing refresh token");
+      }
       this.accessToken = stored.accessToken;
       this.refreshToken = stored.refreshToken;
       this.expiresAt = stored.expiresAt ?? 0;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
 
-  /**
-   * Persist the newest token set with owner-only file permissions.
-   *
-   * @throws Error when the configured cache path cannot be written.
-   */
+  /** Atomically replace the token file without exposing a partially written credential. */
   private async saveStoredToken() {
     const stored: StoredToken = {
       accessToken: this.accessToken,
       refreshToken: this.refreshToken,
       expiresAt: this.expiresAt,
     };
-
-    await mkdir(dirname(this.env.tokenFile), { recursive: true });
-    await writeFile(
-      this.env.tokenFile,
-      `${JSON.stringify(stored, null, 2)}\n`,
-      {
+    const temporary = `${this.env.tokenFile}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(stored, null, 2)}\n`, {
         mode: 0o600,
-      },
-    );
+        flag: "wx",
+      });
+      await rename(temporary, this.env.tokenFile);
+    } finally {
+      await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
   }
 
   /**
@@ -396,7 +426,20 @@ export class StravaClient {
       );
     }
 
-    return response.json();
+    const token = (await response.json()) as Partial<TokenResponse>;
+    if (
+      typeof token.access_token !== "string" ||
+      !token.access_token ||
+      typeof token.refresh_token !== "string" ||
+      !token.refresh_token ||
+      typeof token.expires_at !== "number" ||
+      !Number.isFinite(token.expires_at)
+    ) {
+      throw new Error(
+        "Invalid Strava token refresh response; refresh lock retained",
+      );
+    }
+    return token as TokenResponse;
   }
 
   /**
